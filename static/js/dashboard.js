@@ -966,47 +966,58 @@ async function loadSelfserveBackup() {
 // ============================================
 // 导入功能
 // ============================================
+// 统一 POST：检查 HTTP 状态 + 超时 + {error} 字段，任何失败都抛出可读错误（import-safe）
+async function postJson(url, payload, timeoutMs = 180000) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    let resp;
+    try {
+        resp = await fetch(url, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+            signal: ctrl.signal
+        });
+    } catch (e) {
+        clearTimeout(timer);
+        if (e.name === 'AbortError') throw new Error('请求超时（条目可能过多或服务繁忙），请稍后重试或减少条目');
+        throw new Error('网络请求失败：' + e.message);
+    }
+    clearTimeout(timer);
+    const raw = await resp.text();
+    let data = null;
+    try { data = raw ? JSON.parse(raw) : {}; } catch (_) { data = null; }
+    if (!resp.ok) {
+        const detail = data ? (data.error || data.detail || JSON.stringify(data)) : (raw.slice(0, 200) || resp.statusText);
+        throw new Error('服务器错误 (HTTP ' + resp.status + ')：' + detail);
+    }
+    if (data === null) throw new Error('服务器返回了无法解析的内容：' + (raw.slice(0, 200) || '(空)'));
+    if (data.error) throw new Error(data.error);
+    return data;
+}
+
 async function doTextImport() {
     const file = document.getElementById('txtFile').files[0];
     const text = document.getElementById('txtInput').value.trim();
     const skip = document.getElementById('skipScore').checked;
-    
-    let content = '';
-    if (file) {
-        content = await file.text();
-    } else if (text) {
-        content = text;
-    } else {
-        showImportResult('error', '请先上传文件或输入文本');
-        return;
-    }
-    
-    const lines = content.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-    if (lines.length === 0) {
-        showImportResult('error', '没有找到有效的记忆条目');
-        return;
-    }
-    
-    showImportResult('info', skip 
-        ? '正在导入 ' + lines.length + ' 条记忆...' 
-        : '正在为 ' + lines.length + ' 条记忆自动评分，请稍候...');
-    
     try {
-        const resp = await fetch('/import/text', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({lines: lines, skip_scoring: skip})
-        });
-        const data = await resp.json();
-        if (data.error) {
-            showImportResult('error', '❌ ' + data.error);
-        } else {
-            showImportResult('success', '✅ 导入完成！新增 ' + data.imported + ' 条，跳过 ' + data.skipped + ' 条（已存在），总计 ' + data.total + ' 条');
-            // 刷新记忆列表
-            loadMemories();
-        }
+        let content = '';
+        if (file) content = await file.text();
+        else if (text) content = text;
+        else { showImportResult('error', '请先上传文件或输入文本'); return; }
+
+        const lines = content.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        if (lines.length === 0) { showImportResult('error', '没有找到有效的记忆条目'); return; }
+
+        showImportResult('info', skip
+            ? '正在导入 ' + lines.length + ' 条记忆...'
+            : '正在为 ' + lines.length + ' 条记忆自动评分，请稍候...');
+
+        const data = await postJson('/import/text', {lines: lines, skip_scoring: skip});
+        showImportResult('success', '✅ 导入完成！新增 ' + data.imported + ' 条，跳过 ' + data.skipped + ' 条（已存在），总计 ' + data.total + ' 条');
+        loadMemories();
     } catch(e) {
-        showImportResult('error', '❌ 请求失败：' + e.message);
+        showImportResult('error', '❌ ' + e.message);
     }
 }
 
@@ -1015,17 +1026,12 @@ async function previewJson() {
     const text = document.getElementById('jsonInput').value.trim();
     const preview = document.getElementById('jsonPreview');
     
-    let jsonStr = '';
-    if (file) {
-        jsonStr = await file.text();
-    } else if (text) {
-        jsonStr = text;
-    } else {
-        showImportResult('error', '请先上传文件或粘贴 JSON');
-        return;
-    }
-    
     try {
+        let jsonStr = '';
+        if (file) jsonStr = await file.text();
+        else if (text) jsonStr = text;
+        else { showImportResult('error', '请先上传文件或粘贴 JSON'); return; }
+
         const parsed = JSON.parse(jsonStr);
         const mems = parsed.memories || [];
         if (mems.length === 0) {
@@ -1053,30 +1059,16 @@ async function previewJson() {
 }
 
 async function confirmJsonImport() {
-    if (!pendingJsonData) {
-        showImportResult('error', '请先预览');
-        return;
-    }
-    
+    if (!pendingJsonData) { showImportResult('error', '请先预览'); return; }
     showImportResult('info', '导入中...');
-    
     try {
-        const resp = await fetch('/import/memories', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(pendingJsonData)
-        });
-        const data = await resp.json();
-        if (data.error) {
-            showImportResult('error', '❌ ' + data.error);
-        } else {
-            showImportResult('success', '✅ 导入完成！新增 ' + data.imported + ' 条，跳过 ' + data.skipped + ' 条（已存在），总计 ' + data.total + ' 条');
-            loadMemories();
-        }
+        const data = await postJson('/import/memories', pendingJsonData);
+        showImportResult('success', '✅ 导入完成！新增 ' + data.imported + ' 条，跳过 ' + data.skipped + ' 条（已存在），总计 ' + data.total + ' 条');
+        loadMemories();
         document.getElementById('jsonPreview').innerHTML = '';
         pendingJsonData = null;
     } catch(e) {
-        showImportResult('error', '❌ 请求失败：' + e.message);
+        showImportResult('error', '❌ ' + e.message);
     }
 }
 
